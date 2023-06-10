@@ -11,7 +11,6 @@ from thewalrus import symplectic as walrus_symplectic
 from thewalrus.quantum.gaussian_checks import is_classical_cov
 from scipy.special import factorial as fac
 from scipy.linalg import block_diag, sqrtm
-from calculation import factorial, double_factorial
 import numba
 import os
 import datetime as dt
@@ -20,7 +19,7 @@ import pickle
 
 class BaseSampler:
     """
-    Base class for samplers, will sample a pure state from a mixed one, deal with the pure state in subclasses
+    Base class for samplers, takes care of timing each sample and saving the results
     """
     def __init__(self, experiment: GBSExperiment):
         self._state = None
@@ -75,7 +74,7 @@ def save_result(result):
 
 class PureStateSampler:
     """
-    Sample a pure state, given a mixed state, using the Williamson decomposition
+    Return a pure state, sampled from a mixed state, using the Williamson decomposition
     """
     def __init__(self, experiment: GBSExperiment):
         self._state = None
@@ -100,7 +99,7 @@ class PureStateSampler:
 
 class PureStateSamplerMinSqueeze(PureStateSampler):
     """
-    Sample a pure state, try to minimise the squeezing present in the pure state
+    Return a pure state sampled from a mixed state, try to minimise the squeezing present in the pure state
     """
     def setup(self, experiment: GBSExperiment):
         m = experiment.modes
@@ -127,6 +126,10 @@ class PureStateSamplerMinSqueeze(PureStateSampler):
 
 
 class ExactSampler(BaseSampler):
+    """
+    Exact chain rule sampler, based on methods of [Science advances 8 (4)], [PRX Quantum 3 (1), 010306]
+    Essentially the same as thewalrus hafnian_sampler function, with small optimisations
+    """
     def __init__(self, experiment: GBSExperiment, cutoff=8, pure_state_sampler=None):
         self.pure_state_sampler = pure_state_sampler or PureStateSampler(experiment)
         self.B = None
@@ -165,6 +168,9 @@ class ExactSampler(BaseSampler):
 
 
 class ClassicalSampler(BaseSampler):
+    """
+    Efficiently samples from a classical state
+    """
     def __init__(self, experiment: GBSExperiment):
         self.cov_p = None
         super().__init__(experiment)
@@ -190,6 +196,9 @@ class ClassicalSampler(BaseSampler):
 
 
 class SquashedStateSampler(ClassicalSampler):
+    """
+    Approximates the state by a classical 'squashed' state, which can be sampled efficiently
+    """
     def setup(self, experiment: GBSExperiment):
         state = self.get_squashed_state(experiment)
         assert (is_classical_cov(state.cov))
@@ -222,7 +231,8 @@ class SquashedStateSampler(ClassicalSampler):
 
 class IPSSampler(BaseSampler):
     """
-    Generates pairs and single photons independently, from Poisson distribution
+    Generates pairs and single photons independently, from Poisson distributions
+    Means of Poisson are based on a pure state, which is first sampled from a mixed state
     """
     def __init__(self, experiment: GBSExperiment, pure_state_sampler=None):
         self.B2 = None
@@ -306,6 +316,9 @@ class IPSMatchedTwoCorr(IPSSampler):
 
 
 class TotalNSampler:
+    """
+    Simply samples from the distribution of total N for an experiment
+    """
     def __init__(self, experiment: GBSExperiment):
         state = experiment.calc_output_state()
         self.state = state
@@ -351,6 +364,10 @@ def total_n_get_sample(m, A, AX, eigs, prefactor, displacement=None):
 
 
 class PureTotalNSampler:
+    """
+    A faster sampler for total N - assumes a pure state, and needs to be supplied with the B matrix (state.get_B())
+    Decomposes the B matrix into single mode squeezed states and samples them individually (with alpha supplied)
+    """
     def __init__(self, B):
         self.B = B
         self.u = None
@@ -472,6 +489,7 @@ class StimEmSampler(IPSSampler):
 class StimEmSampler2(IPSSampler):
     """
     Similar to IPS, but try to include the effect of stimulated emission in enhancing photon bunching
+    WORK IN PROGRESS
     """
     def __init__(self, experiment: GBSExperiment):
         super().__init__(experiment)
@@ -540,6 +558,10 @@ class StimEmSampler2(IPSSampler):
 
 
 class IntModeSampler(ExactSampler):
+    """
+    Approximate sampler, distributes the state across n_int 'internal modes' which are unentangled from each other
+    Uses exact sampling method for each internal mode
+    """
     def __init__(self, experiment: GBSExperiment, cutoff=8, n_int: int = 2):
         self.n_int = n_int
         super().__init__(experiment, cutoff)
@@ -584,6 +606,9 @@ class IntModeSampler(ExactSampler):
 
 
 class WalrusSampler(BaseSampler):
+    """
+    Sampler using the 'generate_hafnian_sample' function from thewalrus, here for sanity checking and comparison
+    """
     def __init__(self, experiment: GBSExperiment, cutoff, max_photons):
         super().__init__(experiment)
         self.cutoff = cutoff

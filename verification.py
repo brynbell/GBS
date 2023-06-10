@@ -183,9 +183,9 @@ class XEntropyVerifier(Verifier):
 
 class NCumulantVerifier(Verifier):
     """
-    Compares Nth order cumulants of sample list to theory
+    Compares Nth order cumulants of a sample list to theory
     """
-    def __init__(self, state: GaussianState, sample_list: list[Sample]):
+    def __init__(self, state: GaussianState, sample_list: list[Sample], max_combinations=1000):
         self.cumulants_calc = {}
         self.cumulants_exp = {}
         self.expectation_ns_calc = {}
@@ -193,6 +193,7 @@ class NCumulantVerifier(Verifier):
         self.sample_list = sample_list
         self.sample_array = np.array([sample.det_pattern for sample in sample_list])
         self.state = state
+        self.max_combinations = max_combinations
         self.A = None
         self.set_matrix()
 
@@ -216,21 +217,44 @@ class NCumulantVerifier(Verifier):
         self.A = A
 
     def __call__(self, n: int):
-        m = self.state.modes
-        exp_list = []
-        calc_list = []
-        for comb in itertools.combinations(list(range(m)), n):
-            modes = list(comb)
-            key = str(np.array(modes))[1:-1]
-            self.cumulants_calc.setdefault(key, self.calc_cumulant(modes))
-            self.cumulants_exp.setdefault(key, self.exp_cumulant(modes))
-            exp_list.append(self.cumulants_exp[key])
-            calc_list.append(self.cumulants_calc[key])
+        if comb(self.state.modes, n) <= self.max_combinations:
+            calc_list, exp_list = self.run_all_combinations(n)
+        else:
+            calc_list, exp_list = self.run_random_combinations(n)
         plt.scatter(calc_list, exp_list)
         plt.xlabel(f'Calculated {n}-mode correlators')
         plt.ylabel(f'Sampled {n}-mode correlators')
         plt.plot([min(calc_list), max(calc_list)], [min(calc_list), max(calc_list)], c='black')
         plt.show()
+
+    def run_all_combinations(self, n: int):
+        m = self.state.modes
+        exp_list = []
+        calc_list = []
+        for combination in itertools.combinations(list(range(m)), n):
+            modes = list(combination)
+            key = str(np.array(modes))[1:-1]
+            self.cumulants_calc.setdefault(key, self.calc_cumulant(modes))
+            self.cumulants_exp.setdefault(key, self.exp_cumulant(modes))
+            exp_list.append(self.cumulants_exp[key])
+            calc_list.append(self.cumulants_calc[key])
+        return calc_list, exp_list
+
+    def run_random_combinations(self, n: int):
+        m = self.state.modes
+        exp_list = []
+        calc_list = []
+        keys = []
+        while len(exp_list) < self.max_combinations:
+            modes = np.random.sample(list(range(m)), n)
+            key = str(np.array(modes))[1:-1]
+            if key not in keys:
+                keys.append(key)
+                self.cumulants_calc.setdefault(key, self.calc_cumulant(modes))
+                self.cumulants_exp.setdefault(key, self.exp_cumulant(modes))
+                exp_list.append(self.cumulants_exp[key])
+                calc_list.append(self.cumulants_calc[key])
+        return calc_list, exp_list
 
     def calc_cumulant(self, modes: list[int]):
         """
