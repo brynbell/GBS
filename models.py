@@ -7,6 +7,7 @@ from thewalrus.quantum import Amat
 from scipy.stats import unitary_group
 from scipy.special import factorial as fac
 
+
 class GBSExperiment:
     """
     Simple builder for a GBS experiment, identical sources, balanced loss, unitary transform

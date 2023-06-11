@@ -1,16 +1,17 @@
 from models import GBSExperiment, GaussianState, PureGaussianState, Sample
 from calculation import calc_total_N_prob
 from thewalrus.loop_hafnian_batch import loop_hafnian_batch
-import numpy as np
-import time
-from thewalrus.decompositions import williamson
+from thewalrus.decompositions import williamson, blochmessiah
 from thewalrus.samples import generate_hafnian_sample
 from thewalrus.quantum.conversions import Xmat, Covmat
 from thewalrus.quantum.fock_tensors import _prefactor
 from thewalrus import symplectic as walrus_symplectic
 from thewalrus.quantum.gaussian_checks import is_classical_cov
+from thewalrus.symplectic import expand
 from scipy.special import factorial as fac
 from scipy.linalg import block_diag, sqrtm
+import numpy as np
+import time
 import numba
 import os
 import datetime as dt
@@ -605,6 +606,94 @@ class IntModeSampler(ExactSampler):
             det_pattern_overall += det_pattern
         return det_pattern_overall
 
+
+class MPSSampler(BaseSampler):
+    """
+    Toy implementation based on [Oh, Liu, Alexev, Fefferman, Jiang, arxiv:2306.03709]
+    """
+
+    def __init__(self, experiment: GBSExperiment, cutoff=8, bond_dimension=10):
+        self.pure_state_sampler = PureStateSamplerMinSqueeze(experiment)
+        self.cutoff = cutoff
+        self.bond_dimension = bond_dimension
+        super().__init__(experiment)
+
+    def setup(self, experiment: GBSExperiment):
+        super().setup(experiment)
+        self.pure_cov = self.pure_state_sampler.get_sample().cov
+        self.As = None
+        self.build_mps()
+
+    def build_mps(self):
+        self.As = []
+        m, cov = self._state.modes, self.pure_cov
+        self.As.append(self.calc_first_tensor())
+        for i in range(1, m-1):
+            self.As.append(self.calc_tensor(i))
+        self.As.append(self.calc_last_tensor())
+
+    def calc_first_tensor(self):
+        """
+        Calculate first tensor in MPS
+        """
+        A = np.zeros((self.cutoff, self.bond_dimension))
+        m, cov = self._state.modes, self.pure_cov
+        reduced_cov = np.delete(np.delete(cov, [0, m], 0), [0, m], 1)
+        _, U = williamson(cov)
+        D_reduced, U_reduced = williamson(reduced_cov)
+        U_reduced = expand(U_reduced, range(1, m), m)
+        thermal_pop = (np.diag(D_reduced)[:m-1] + np.diag(D_reduced)[m-1:]) / 4 - 1 / 2
+        thermal_pop[thermal_pop < 0.0] = 0.0
+        thermal_probs = thermal_pop / (1 + thermal_pop)
+        n_alpha = self.get_n_alpha(thermal_probs)
+        for n in range(self.cutoff):
+            for alpha in range(self.bond_dimension):
+                A[n, alpha] = \
+                    self.calc_matrix_element(U_reduced, U, np.concatenate([n], n_alpha[alpha]), np.zeros(m, dtype=int))
+        return A
+
+    def calc_tensor(self, mode):
+        pass
+
+    def calc_last_tensor(self):
+        pass
+
+    def get_n_alpha(self, weights):
+        m = len(weights)
+        order = np.argsort(weights)[::-1]
+        inv_order = np.argsort(order)
+        weights = weights[order]
+        ratios = [weights[i + 1] / weights[i] for i in range(m - 1)]
+        n_alpha = []
+        possibles = [np.zeros(m, dtype=int)] #possible choices for next n_alpha, jth entry contains j photons
+        prod_weights = [1]
+        def advance_possible_j(j):
+            i = None
+            ratio = 0
+            for k in range(m - 1):
+                if possibles[j][k] > 0 and ratios[k] > ratio:
+                    i = k
+                    ratio = ratios[k]
+            if i is None:
+                prod_weights[j] = 0
+            else:
+                possibles[j][i] -= 1
+                possibles[j][i + 1] += 1
+                prod_weights[j] *= ratio
+
+        for i in range(self.bond_dimension):
+            j = np.argmax(prod_weights)
+            n_alpha.append(possibles[j][inv_order])
+            if j + 1 == len(possibles):
+                new_possible = np.zeros(self._state.modes, dtype=int)
+                new_possible[0] = j + 1
+                possibles.append(new_possible)
+                prod_weights.append(weights[0] ** (j + 1))
+            advance_possible_j(j)
+        return n_alpha
+
+    def calc_matrix_element(self, U_lhs, U_rhs, n_lhs, n_rhs):
+        uff, dff, vff = blochmessiah(np.conj(np.transpose(U_lhs)) @ U_rhs)
 
 class WalrusSampler(BaseSampler):
     """
