@@ -73,8 +73,9 @@ class Sample:
         self.modes = len(det_pattern)
 
     def encode(self):
-        # convert sample to decimal code which is unique within (M,N) space
+        # convert detection pattern to string (space separated integers) for use as dictionary key, etc
         return str(self.det_pattern)[1:-1]
 
     def decode(self):
+        # inverse of encode - get detection pattern as numpy array from a string
         return np.array([int(n) for n in self.string.split()], dtype=int)
