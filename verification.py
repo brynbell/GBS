@@ -6,6 +6,7 @@ from scipy.special import comb
 import matplotlib.pyplot as plt
 import itertools
 
+rng = np.random.default_rng()
 
 class Verifier:
     pass
@@ -246,7 +247,7 @@ class NCumulantVerifier(Verifier):
         calc_list = []
         keys = []
         while len(exp_list) < self.max_combinations:
-            modes = np.random.sample(list(range(m)), n)
+            modes = list(np.sort(rng.choice(m, n, replace=False)))
             key = str(np.array(modes))[1:-1]
             if key not in keys:
                 keys.append(key)

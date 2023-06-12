@@ -16,6 +16,7 @@ import os
 import datetime as dt
 import pickle
 
+rng = np.random.default_rng()
 
 class BaseSampler:
     """
@@ -93,7 +94,7 @@ class PureStateSampler:
         self.sqrtW = S @ np.sqrt(DmI)
 
     def get_sample(self):
-        displacement = self._state.displacement + self.sqrtW @ np.random.normal(size=2 * self._state.modes)
+        displacement = self._state.displacement + self.sqrtW @ rng.normal(size=2 * self._state.modes)
         return PureGaussianState(self._state.modes, self.pure_cov, displacement)
 
 
@@ -154,7 +155,7 @@ class ExactSampler(BaseSampler):
         alpha = pure_state.get_alpha()
         det_outcomes = np.arange(self.cutoff + 1)
         det_pattern = np.zeros(m, dtype=int)
-        heterodyne_mu = pure_state.displacement + self.chol_T_I @ np.random.normal(size=2 * m)
+        heterodyne_mu = pure_state.displacement + self.chol_T_I @ rng.normal(size=2 * m)
         heterodyne_alpha = (heterodyne_mu[:m] + 1j * heterodyne_mu[m:]) / 2
         gamma = alpha.conj() + self.B @ (heterodyne_alpha - alpha)
         for i in range(m):
@@ -163,7 +164,7 @@ class ExactSampler(BaseSampler):
             lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff)
             probs = (lhafs * lhafs.conj()).real / fac(det_outcomes)
             probs /= probs.sum()
-            det_pattern[i] = np.random.choice(det_outcomes, p=probs)
+            det_pattern[i] = rng.choice(det_outcomes, p=probs)
         return det_pattern
 
 
@@ -187,11 +188,11 @@ class ClassicalSampler(BaseSampler):
 
     def _get_sample(self):
         m = self._state.modes
-        displacement = np.random.multivariate_normal(self._state.displacement, self.cov_p)
+        displacement = rng.multivariate_normal(self._state.displacement, self.cov_p)
         alpha2 = (displacement[:m] ** 2 + displacement[m:] ** 2) / 4
         det_pattern = np.zeros(m, dtype=int)
         for i in range(self._state.modes):
-            det_pattern[i] = np.random.poisson(alpha2[i])
+            det_pattern[i] = rng.poisson(alpha2[i])
         return det_pattern
 
 
@@ -251,9 +252,9 @@ class IPSSampler(BaseSampler):
         m = pure_state.modes
         det_pattern = np.zeros(m, dtype=int)
         for i in range(m):
-            det_pattern[i] += np.random.poisson(alpha2[i]) + 2 * np.random.poisson(self.B2[i, i] / 2)
+            det_pattern[i] += rng.poisson(alpha2[i]) + 2 * rng.poisson(self.B2[i, i] / 2)
             for j in range(i+1, m):
-                x = np.random.poisson(self.B2[i, j])
+                x = rng.poisson(self.B2[i, j])
                 det_pattern[i] += x
                 det_pattern[j] += x
         return det_pattern
@@ -293,11 +294,11 @@ class IPSMatchedTwoCorr(IPSSampler):
         alpha2 = abs(alpha) ** 2
         det_pattern = np.zeros(m, dtype=int)
         for i in range(m):
-            det_pattern[i] += np.random.poisson(alpha2[i])
+            det_pattern[i] += rng.poisson(alpha2[i])
             for j in range(i+1, m):
                 B = self.get_two_mode_correlator(cov, alpha, m, i, j)
                 if B > 0:
-                    x = np.random.poisson(B)
+                    x = rng.poisson(B)
                     det_pattern[i] += x
                     det_pattern[j] += x
         return det_pattern
@@ -344,7 +345,7 @@ def total_n_get_sample(m, A, AX, eigs, prefactor, displacement=None):
     Xgamma[m:] = gamma[:m]
     coeffs = np.ones((1, 1), dtype=np.complex128)
     e = np.ones(2 * m, dtype=np.complex128)
-    r = np.random.rand()
+    r = rng.random()
     accumulator = prefactor
     n = 0
     while r > accumulator.real:
@@ -397,7 +398,7 @@ class PureTotalNSampler:
 def sample_single_pure_source_n(B: np.complex128, alpha: np.complex128):
     gamma = np.conj(alpha) - B * alpha
     P0 = np.exp(-(gamma * alpha).real) * np.sqrt(1 - abs(B)**2)
-    r = np.random.rand()
+    r = rng.random()
     accumulator = P0
     n = 0
     psi_pairs = np.array([1], dtype=np.complex128)
@@ -432,19 +433,19 @@ class StimEmSampler(IPSSampler):
         det_pattern = np.zeros(m, dtype=int)
         process_counts = np.zeros(len(probs), dtype=int)
         while sum(det_pattern) < n - 1:
-            outcome_idx = np.random.choice(len(probs), p=probs/sum(probs))
+            outcome_idx = rng.choice(len(probs), p=probs/sum(probs))
             process_counts[outcome_idx] += 1
             probs[outcome_idx] *= process_counts[outcome_idx] / (process_counts[outcome_idx] + 1)
             outcome_modes = self.get_modes_from_idx(m, outcome_idx)
             for i in outcome_modes:
                 self.add_photon(m, det_pattern, i, probs)
         if sum(det_pattern) < n:
-            outcome = np.random.choice(m, p=probs[:m] / sum(probs[:m]))
+            outcome = rng.choice(m, p=probs[:m] / sum(probs[:m]))
             det_pattern[outcome] += 1
         return det_pattern
 
     def sample_total_n(self, state):
-        r = np.random.rand()
+        r = rng.random()
         n = 0
         accumulator = calc_total_N_prob(0, state)
         while r > accumulator:
@@ -506,19 +507,19 @@ class StimEmSampler2(IPSSampler):
         det_pattern = np.zeros(m, dtype=int)
         process_counts = np.zeros(len(probs), dtype=int)
         while sum(det_pattern) < n - 1:
-            outcome_idx = np.random.choice(len(probs), p=probs/sum(probs))
+            outcome_idx = rng.choice(len(probs), p=probs/sum(probs))
             process_counts[outcome_idx] += 1
             probs[outcome_idx] *= process_counts[outcome_idx] / (process_counts[outcome_idx] + 1)
             outcome_modes = self.get_modes_from_idx(m, outcome_idx)
             for i in outcome_modes:
                 self.add_photon(m, det_pattern, i, probs)
         if sum(det_pattern) < n:
-            outcome = np.random.choice(m, p=probs[:m] / sum(probs[:m]))
+            outcome = rng.choice(m, p=probs[:m] / sum(probs[:m]))
             det_pattern[outcome] += 1
         return det_pattern
 
     def sample_total_n(self, state):
-        r = np.random.rand()
+        r = rng.random()
         n = 0
         accumulator = calc_total_N_prob(0, state)
         while r > accumulator:
@@ -591,7 +592,7 @@ class IntModeSampler(ExactSampler):
         det_pattern_overall = np.zeros(m, dtype=int)
         for k in range(self.n_int):
             det_pattern = np.zeros(m, dtype=int)
-            heterodyne_mu = disp + self.chol_T_I @ np.random.normal(size=2 * m)
+            heterodyne_mu = disp + self.chol_T_I @ rng.normal(size=2 * m)
             heterodyne_alpha = (heterodyne_mu[:m] + 1j * heterodyne_mu[m:]) / 2
             gamma = alpha.conj() + self.B @ (heterodyne_alpha - alpha)
             for i in range(m):
@@ -600,7 +601,7 @@ class IntModeSampler(ExactSampler):
                 lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff)
                 probs = (lhafs * lhafs.conj()).real / fac(det_outcomes)
                 probs /= probs.sum()
-                det_pattern[i] = np.random.choice(det_outcomes, p=probs)
+                det_pattern[i] = rng.choice(det_outcomes, p=probs)
             det_pattern_overall += det_pattern
         return det_pattern_overall
 
