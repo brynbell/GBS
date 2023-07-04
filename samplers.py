@@ -1,5 +1,5 @@
 from models import GBSExperiment, GaussianState, PureGaussianState, Sample
-from calculation import calc_total_N_prob
+from calculation import calc_total_N_prob, nchoosek
 from thewalrus.loop_hafnian_batch import loop_hafnian_batch
 import numpy as np
 import time
@@ -23,7 +23,7 @@ class BaseSampler:
     Base class for samplers, takes care of timing each sample and saving the results
     """
     def __init__(self, experiment: GBSExperiment):
-        self._state = None
+        self._state: GaussianState = None
         self.setup(experiment)
 
     def setup(self, experiment: GBSExperiment):
@@ -604,6 +604,75 @@ class IntModeSampler(ExactSampler):
                 det_pattern[i] = rng.choice(det_outcomes, p=probs)
             det_pattern_overall += det_pattern
         return det_pattern_overall
+
+
+class MSourceSampler(BaseSampler):
+    """
+    Faster exact sampler for when number of sources = number of modes (with balanced loss)
+    """
+    def __init__(self, experiment: GBSExperiment, cutoff=8):
+        assert(experiment.sources == experiment.modes)
+        self.cutoff = cutoff
+        self.c = None
+        self.B = None
+        self.chol_T_I = None
+        self.order = None
+        self.inv_order = None
+        super().__init__(experiment)
+
+    def setup(self, experiment: GBSExperiment):
+        super().setup(experiment)
+        A = self._state.get_A()
+        m = self._state.modes
+        self.c = A[0, m].real
+        self.B = A[:m, :m] / (1 - self.c)
+        cov = self.get_cov_from_B(self.B)
+        nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
+        self.chol_T_I = np.linalg.cholesky(cov + np.eye(2 * m))
+        self.order = np.argsort(nbar)
+        self.inv_order = np.argsort(self.order)
+        order_long = np.concatenate((self.order, self.order + m))
+        self.B = self.B[np.ix_(self.order, self.order)]
+        self.chol_T_I = self.chol_T_I[np.ix_(order_long, order_long)]
+
+    def _get_sample(self):
+        m = self._state.modes
+        det_outcomes = np.arange(self.cutoff + 1)
+        det_pattern = np.zeros(m, dtype=int)
+        heterodyne_mu = self.chol_T_I @ rng.normal(size=2 * m)
+        heterodyne_alpha = (heterodyne_mu[:m] + 1j * heterodyne_mu[m:]) / 2
+        gamma = self.B @ heterodyne_alpha
+        for i in range(m):
+            j = i + 1
+            gamma -= heterodyne_alpha[i] * self.B[:, i]
+            lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff, glynn=False)
+            probs = (lhafs * lhafs.conj()).real / fac(det_outcomes)
+            probs /= probs.sum()
+            det_pattern[i] = rng.choice(det_outcomes, p=probs)
+        for i in range(m):
+            det_pattern[i] += self.sample_noise_photons(det_pattern[i])
+        return det_pattern[self.inv_order]
+
+    def get_cov_from_B(self, B):
+        m = self._state.modes
+        A = block_diag(B, B.conj())
+        return Covmat(np.linalg.inv(np.eye(2 * m) - (Xmat(m) @ A).conj())) #Qinv = I - (XA)*
+
+    def sample_noise_photons(self, n):
+        """
+        sample number of additional noise photons n2, given n photons sampled already, and using self.c
+        p = norm.const * self.c ** n2 * nchoosek(n + n2, n)
+        norm.const = (1 - self.c) ** (n + 1)
+        """
+        threshold = rng.random() / (1 - self.c) ** (n + 1)
+        cumulator = 1
+        p = 1
+        n2 = 0
+        while cumulator < threshold:
+            n2 += 1
+            p *= self.c * (n + n2) / n2
+            cumulator += p # self.c ** n2 * nchoosek(n + n2, n)
+        return n2
 
 
 class WalrusSampler(BaseSampler):
