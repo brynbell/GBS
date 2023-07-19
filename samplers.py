@@ -105,12 +105,12 @@ class PureStateSamplerMinSqueeze(PureStateSampler):
     def setup(self, experiment: GBSExperiment):
         m = experiment.modes
         self._state = experiment.calc_output_state()
-        vac_vec, cov = walrus_symplectic.vacuum_state(m)
+        displacement, cov = walrus_symplectic.vacuum_state(m)
         for i in range(experiment.sources):
-            s = walrus_symplectic.squeezing(experiment.squeezing, 0)
+            s = walrus_symplectic.squeezing(experiment.squeezing[i], 0)
             S = walrus_symplectic.expand(s, i, experiment.modes)
             cov = S @ cov @ S.conj().T
-            vac_vec, cov = walrus_symplectic.loss(vac_vec, cov, experiment.transmission, i)
+            displacement, cov = walrus_symplectic.loss(displacement, cov, experiment.transmission[i], i)
         self.pure_cov = cov.copy()
         for i in range(experiment.sources):
             if self.pure_cov[i, i] < 1.0:
@@ -209,9 +209,9 @@ class SquashedStateSampler(ClassicalSampler):
 
     def get_squashed_state(self, experiment: GBSExperiment):
         m = experiment.modes
-        vac_vec, cov = walrus_symplectic.vacuum_state(m)
+        displacement, cov = walrus_symplectic.vacuum_state(m)
         for i in range(experiment.sources):
-            s = walrus_symplectic.squeezing(experiment.squeezing, 0)
+            s = walrus_symplectic.squeezing(experiment.squeezing[i], 0)
             S = walrus_symplectic.expand(s, i, experiment.modes)
             cov = S @ cov @ S.conj().T
         for i in range(m):
@@ -223,10 +223,8 @@ class SquashedStateSampler(ClassicalSampler):
                 cov[i, i] = 4 * n + 1
                 cov[i + m, i + m] = 1
         for i in range(experiment.sources):
-            vac_vec, cov = walrus_symplectic.loss(vac_vec, cov, experiment.transmission, i)
-        S_U = walrus_symplectic.interferometer(experiment.unitary)
-        cov = S_U @ cov @ S_U.conj().T
-        displacement = np.zeros(2 * experiment.modes)
+            displacement, cov = walrus_symplectic.loss(displacement, cov, experiment.transmission[i], i)
+        displacement, cov = walrus_symplectic.passive_transformation(displacement, cov, experiment.unitary)
         return GaussianState(experiment.modes, cov, displacement)
 
 
@@ -622,10 +620,13 @@ class MSourceSampler(BaseSampler):
 
     def setup(self, experiment: GBSExperiment):
         super().setup(experiment)
-        A = self._state.get_A()
+        self.B = self._state.get_B()
+        C = self._state.get_C()
         m = self._state.modes
-        self.c = A[0, m].real
-        self.B = A[:m, :m] / (1 - self.c)
+        self.c = np.diag(C).real
+        for i in range(m):
+            self.B[:, i] /= np.sqrt(1 - self.c[i])
+            self.B[i, :] /= np.sqrt(1 - self.c[i])
         cov = self.get_cov_from_B(self.B)
         nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
         self.chol_T_I = np.linalg.cholesky(cov + np.eye(2 * m))
@@ -650,7 +651,7 @@ class MSourceSampler(BaseSampler):
             probs /= probs.sum()
             det_pattern[i] = rng.choice(det_outcomes, p=probs)
         for i in range(m):
-            det_pattern[i] += self.sample_noise_photons(det_pattern[i])
+            det_pattern[i] += self.sample_noise_photons(det_pattern[i], self.c[i])
         return det_pattern[self.inv_order]
 
     def get_cov_from_B(self, B):
@@ -658,19 +659,19 @@ class MSourceSampler(BaseSampler):
         A = block_diag(B, B.conj())
         return Covmat(np.linalg.inv(np.eye(2 * m) - (Xmat(m) @ A).conj())) #Qinv = I - (XA)*
 
-    def sample_noise_photons(self, n):
+    def sample_noise_photons(self, n, c):
         """
         sample number of additional noise photons n2, given n photons sampled already, and using self.c
         p = norm.const * self.c ** n2 * nchoosek(n + n2, n)
         norm.const = (1 - self.c) ** (n + 1)
         """
-        threshold = rng.random() / (1 - self.c) ** (n + 1)
+        threshold = rng.random() / (1 - c) ** (n + 1)
         cumulator = 1
         p = 1
         n2 = 0
         while cumulator < threshold:
             n2 += 1
-            p *= self.c * (n + n2) / n2
+            p *= c * (n + n2) / n2
             cumulator += p # self.c ** n2 * nchoosek(n + n2, n)
         return n2
 

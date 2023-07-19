@@ -6,6 +6,7 @@ from thewalrus.decompositions import williamson
 from thewalrus.quantum import Amat
 from scipy.stats import unitary_group
 from scipy.special import factorial as fac
+from os.path import join as path_join
 
 class GBSExperiment:
     """
@@ -14,20 +15,35 @@ class GBSExperiment:
     def __init__(self, modes=10, sources=5, squeezing=1.0, transmission=0.5, unitary=None):
         self.modes = modes
         self.sources = sources
-        self.squeezing = squeezing
-        self.transmission = transmission
+        self.squeezing = squeezing if isinstance(squeezing, list) else [squeezing] * self.sources
+        self.transmission = transmission if isinstance(transmission, list) else [transmission] * self.sources
         self.unitary = unitary if unitary is not None else unitary_group.rvs(self.modes)
 
     def calc_output_state(self):
-        vac_vec, cov = walrus_symplectic.vacuum_state(self.modes)
+        displacement, cov = walrus_symplectic.vacuum_state(self.modes)
         for i in range(self.sources):
-            s = walrus_symplectic.squeezing(self.squeezing, 0)
+            s = walrus_symplectic.squeezing(self.squeezing[i], 0)
             S = walrus_symplectic.expand(s, i, self.modes)
             cov = S @ cov @ S.conj().T
-            vac_vec, cov = walrus_symplectic.loss(vac_vec, cov, self.transmission, i)
-        S_U = walrus_symplectic.interferometer(self.unitary)
-        cov = S_U @ cov @ S_U.conj().T
-        displacement = np.zeros(2 * self.modes)
+            displacement, cov = walrus_symplectic.loss(displacement, cov, self.transmission[i], i)
+        displacement, cov = walrus_symplectic.passive_transformation(displacement, cov, self.unitary)
+        return GaussianState(self.modes, cov, displacement)
+
+
+class BorealisExperiment:
+    def __init__(self, path):
+        self.squeezing = np.load(path_join(path, 'r.npy'))
+        self.T = np.load(path_join(path, 'T.npy'))
+        self.modes = self.T.shape[0]
+        self.sources = self.modes
+
+    def calc_output_state(self):
+        displacement, cov = walrus_symplectic.vacuum_state(self.modes)
+        for i in range(self.modes):
+            s = walrus_symplectic.squeezing(self.squeezing[i], 0)
+            S = walrus_symplectic.expand(s, i, self.modes)
+            cov = S @ cov @ S.conj().T
+        displacement, cov = walrus_symplectic.passive_transformation(displacement, cov, self.T)
         return GaussianState(self.modes, cov, displacement)
 
 
@@ -43,6 +59,12 @@ class GaussianState:
     def get_A(self):
         return Amat(self.cov)
 
+    def get_B(self):
+        return self.get_A()[:self.modes, :self.modes]
+
+    def get_C(self):
+        return self.get_A()[:self.modes, self.modes:]
+
     def get_alpha(self):
         return (self.displacement[:self.modes] + 1j * self.displacement[self.modes:]) / 2
 
@@ -56,8 +78,7 @@ class GaussianState:
 
 
 class PureGaussianState(GaussianState):
-    def get_B(self):
-        return self.get_A()[:self.modes, :self.modes]
+    pass
 
 
 class Sample:

@@ -5,9 +5,9 @@ import numpy as np
 
 if __name__ == '__main__':
     m = 6
-    experiment = GBSExperiment(modes=m, sources=m // 2, squeezing=1.1, transmission=0.5)
+    experiment = GBSExperiment(modes=m, sources=m, squeezing=1.1, transmission=0.33)
     state = experiment.calc_output_state()
-    sampler = samplers.IPSSampler(experiment, pure_state_sampler=samplers.PureStateSamplerMinSqueeze(experiment))
+    sampler = samplers.MSourceSampler(experiment, cutoff=4)
 
     result = sampler.run(10000)
     print(f'Mean total photon number: {np.mean([sum(sample.det_pattern) for sample in result.sample_list])}')
