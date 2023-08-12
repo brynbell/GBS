@@ -30,7 +30,7 @@ class GBSExperiment:
         return GaussianState(self.modes, cov, displacement)
 
 
-class BorealisExperiment:
+class BorealisExperiment(GBSExperiment):
     def __init__(self, path):
         self.squeezing = np.load(path_join(path, 'r.npy'))
         self.T = np.load(path_join(path, 'T.npy'))

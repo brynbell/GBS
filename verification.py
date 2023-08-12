@@ -76,7 +76,7 @@ class TotalDistributionVerifier(Verifier):
                 tvd[n] += 0.5 * np.abs(p_exp - p_calc)
                 fidelity[n] += np.sqrt(p_calc * p_exp)
             fidelity[n] = abs(fidelity[n]) ** 2
-            tvd[n] += 1 - p_calc_total
+            tvd[n] += 0.5 * (1 - p_calc_total)
             print(f'{n} photon fidelity: {fidelity[n]}')
             print(f'{n} photon TVD: {tvd[n]}')
 

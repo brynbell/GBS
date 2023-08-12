@@ -8,7 +8,7 @@ from thewalrus.samples import generate_hafnian_sample
 from thewalrus.quantum.conversions import Xmat, Covmat
 from thewalrus.quantum.fock_tensors import _prefactor
 from thewalrus import symplectic as walrus_symplectic
-from thewalrus.quantum.gaussian_checks import is_classical_cov
+from thewalrus.quantum.gaussian_checks import is_valid_cov, is_classical_cov
 from scipy.special import factorial as fac
 from scipy.linalg import block_diag, sqrtm
 import numba
@@ -85,6 +85,16 @@ class PureStateSampler:
 
     def setup(self, experiment: GBSExperiment):
         self._state = experiment.calc_output_state()
+        m = self._state.modes
+        cov = self._state.cov
+        D, S = williamson(cov)
+        self.pure_cov = S @ S.T
+        DmI = D - np.eye(2 * m)
+        DmI[abs(DmI) < 1e-11] = 0.0  # remove slightly negative values
+        self.sqrtW = S @ np.sqrt(DmI)
+
+    def setup_from_state(self, state: GaussianState):
+        self._state = state
         m = self._state.modes
         cov = self._state.cov
         D, S = williamson(cov)
@@ -628,8 +638,8 @@ class MSourceSampler(BaseSampler):
             self.B[:, i] /= np.sqrt(1 - self.c[i])
             self.B[i, :] /= np.sqrt(1 - self.c[i])
         cov = self.get_cov_from_B(self.B)
-        nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
         self.chol_T_I = np.linalg.cholesky(cov + np.eye(2 * m))
+        nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
         self.order = np.argsort(nbar)
         self.inv_order = np.argsort(self.order)
         order_long = np.concatenate((self.order, self.order + m))
@@ -672,7 +682,98 @@ class MSourceSampler(BaseSampler):
         while cumulator < threshold:
             n2 += 1
             p *= c * (n + n2) / n2
-            cumulator += p # self.c ** n2 * nchoosek(n + n2, n)
+            cumulator += p # c ** n2 * nchoosek(n + n2, n)
+        return n2
+
+
+class FasterExactSampler(ExactSampler):
+    """
+    Generalise MSourceSampler to include off-diagonals in C.
+    Currently assume no displacement
+    """
+    def __init__(self, experiment: GBSExperiment, cutoff=8, pure_state_sampler=None):
+        self.d = None
+        super().__init__(experiment, cutoff, pure_state_sampler)
+
+    def setup(self, experiment: GBSExperiment):
+        super().setup(experiment)
+        m = self._state.modes
+        noise_removed_A, self.d = self.calc_A_and_d()
+        noise_removed_cov = self.get_cov_from_A(noise_removed_A)
+        assert (is_valid_cov(noise_removed_cov))
+        noise_removed_state = GaussianState(m, noise_removed_cov, np.zeros(2*m))
+        self.pure_state_sampler.setup_from_state(noise_removed_state)
+        self.chol_T_I = np.linalg.cholesky(self.pure_state_sampler.pure_cov + np.eye(2 * m))
+        example_pure_state = self.pure_state_sampler.get_sample()
+        self.B = example_pure_state.get_B()  # store B, it doesn't vary from sample to sample
+        nbar = np.diag(noise_removed_cov)[:m] + np.diag(noise_removed_cov)[m:]
+        self.order = np.argsort(nbar)
+        self.inv_order = np.argsort(self.order)
+        order_long = np.concatenate((self.order, self.order + m))
+        self.B = self.B[np.ix_(self.order, self.order)]
+        self.d = self.d[self.order]
+        self.chol_T_I = self.chol_T_I[np.ix_(order_long, order_long)]
+
+    def calc_A_and_d(self):
+        C, m = self._state.get_C(), self._state.modes
+        fixed_indices = [i for i in range(m)]
+        reduced_indices = [np.argmax(np.diag(C))]
+        fixed_indices.remove(reduced_indices[0])
+        go = True
+        while go is True:
+            P, Q = C[np.ix_(reduced_indices, reduced_indices)], C[np.ix_(reduced_indices, fixed_indices)]
+            Rinv = np.linalg.inv(C[np.ix_(fixed_indices, fixed_indices)])
+            schur_comp = P - Q @ Rinv @ np.transpose(np.conj(Q))
+            emin = min(np.linalg.eigvalsh(schur_comp))
+            biggest_fixed_index = fixed_indices[np.argmax(np.diag(C)[fixed_indices])] \
+                if len(fixed_indices) > 0 else None
+            if biggest_fixed_index is not None \
+                    and np.diag(C)[biggest_fixed_index] > np.diag(C)[reduced_indices[0]] - emin:
+                for i in reduced_indices:
+                    C[i, i] = max(np.diag(C)[fixed_indices])
+                reduced_indices.append(biggest_fixed_index)
+                fixed_indices.remove(biggest_fixed_index)
+            else:
+                for i in reduced_indices:
+                    C[i, i] -= emin
+                    go = False
+        d = (np.diag(self._state.get_C()) - np.diag(C)).real
+        # assert(all(np.linalg.eigvalsh(C) >= 0))
+        A = self._state.get_A()
+        A[:m, m:] = C
+        A[m:, :m] = np.transpose(C)
+        for i in range(m):
+            A[i, :] /= np.sqrt(1 - d[i])
+            A[i + m, :] /= np.sqrt(1 - d[i])
+            A[:, i] /= np.sqrt(1 - d[i])
+            A[:, i + m] /= np.sqrt(1 - d[i])
+        return A, d
+
+    def _get_sample(self):
+        det_pattern = super()._get_sample()
+        m = self._state.modes
+        for i in range(m):
+            det_pattern[i] += self.sample_noise_photons(det_pattern[i], self.d[i])
+        return det_pattern[self.inv_order]
+
+    def get_cov_from_A(self, A):
+        m = self._state.modes
+        return Covmat(np.linalg.inv(np.eye(2 * m) - (Xmat(m) @ A).conj()))  # Qinv = I - (XA)*
+
+    def sample_noise_photons(self, n, d):
+        """
+        sample number of additional noise photons n2, given n photons sampled already
+        p = norm.const * d ** n2 * nchoosek(n + n2, n)
+        norm.const = (1 - d) ** (n + 1)
+        """
+        threshold = rng.random() / (1 - d) ** (n + 1)
+        cumulator = 1
+        p = 1
+        n2 = 0
+        while cumulator < threshold:
+            n2 += 1
+            p *= d * (n + n2) / n2
+            cumulator += p  # d ** n2 * nchoosek(n + n2, n)
         return n2
 
 
