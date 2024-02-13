@@ -1,3 +1,5 @@
+import datetime
+
 from models import GBSExperiment, GaussianState, PureGaussianState, Sample
 from calculation import calc_total_N_prob, nchoosek
 from thewalrus.loop_hafnian_batch import loop_hafnian_batch
@@ -169,12 +171,15 @@ class ExactSampler(BaseSampler):
         heterodyne_alpha = (heterodyne_mu[:m] + 1j * heterodyne_mu[m:]) / 2
         gamma = alpha.conj() + self.B @ (heterodyne_alpha - alpha)
         for i in range(m):
+            start_time = datetime.datetime.now()
             j = i + 1
             gamma -= heterodyne_alpha[i] * self.B[:, i]
-            lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff)
+            lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff, glynn=False)
             probs = (lhafs * lhafs.conj()).real / fac(det_outcomes)
             probs /= probs.sum()
             det_pattern[i] = rng.choice(det_outcomes, p=probs)
+            print(f'Mode {i} of {m}, {sum(det_pattern)} photons. Elapsed time: '
+                  f'{(datetime.datetime.now()-start_time).total_seconds()}s')
         return det_pattern
 
 
@@ -787,8 +792,8 @@ class WalrusSampler(BaseSampler):
         self.max_photons = max_photons
 
     def _get_sample(self):
-        det_pattern =  generate_hafnian_sample(self._state.cov, self._state.displacement, cutoff=self.cutoff,
-                                               max_photons=self.max_photons)
+        det_pattern = generate_hafnian_sample(self._state.cov, self._state.displacement, cutoff=self.cutoff,
+                                              max_photons=self.max_photons)
         if det_pattern == -1:
             return [0] * self._state.modes
         return det_pattern
