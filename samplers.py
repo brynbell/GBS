@@ -1,3 +1,5 @@
+import datetime
+
 from models import GBSExperiment, GaussianState, PureGaussianState, Sample
 from calculation import calc_total_N_prob, nchoosek
 from thewalrus.loop_hafnian_batch import loop_hafnian_batch
@@ -8,7 +10,7 @@ from thewalrus.samples import generate_hafnian_sample
 from thewalrus.quantum.conversions import Xmat, Covmat
 from thewalrus.quantum.fock_tensors import _prefactor
 from thewalrus import symplectic as walrus_symplectic
-from thewalrus.quantum.gaussian_checks import is_classical_cov
+from thewalrus.quantum.gaussian_checks import is_valid_cov, is_classical_cov
 from scipy.special import factorial as fac
 from scipy.linalg import block_diag, sqrtm
 import numba
@@ -93,6 +95,16 @@ class PureStateSampler:
         DmI[abs(DmI) < 1e-11] = 0.0  # remove slightly negative values
         self.sqrtW = S @ np.sqrt(DmI)
 
+    def setup_from_state(self, state: GaussianState):
+        self._state = state
+        m = self._state.modes
+        cov = self._state.cov
+        D, S = williamson(cov)
+        self.pure_cov = S @ S.T
+        DmI = D - np.eye(2 * m)
+        DmI[abs(DmI) < 1e-11] = 0.0  # remove slightly negative values
+        self.sqrtW = S @ np.sqrt(DmI)
+
     def get_sample(self):
         displacement = self._state.displacement + self.sqrtW @ rng.normal(size=2 * self._state.modes)
         return PureGaussianState(self._state.modes, self.pure_cov, displacement)
@@ -105,12 +117,12 @@ class PureStateSamplerMinSqueeze(PureStateSampler):
     def setup(self, experiment: GBSExperiment):
         m = experiment.modes
         self._state = experiment.calc_output_state()
-        vac_vec, cov = walrus_symplectic.vacuum_state(m)
+        displacement, cov = walrus_symplectic.vacuum_state(m)
         for i in range(experiment.sources):
-            s = walrus_symplectic.squeezing(experiment.squeezing, 0)
+            s = walrus_symplectic.squeezing(experiment.squeezing[i], 0)
             S = walrus_symplectic.expand(s, i, experiment.modes)
             cov = S @ cov @ S.conj().T
-            vac_vec, cov = walrus_symplectic.loss(vac_vec, cov, experiment.transmission, i)
+            displacement, cov = walrus_symplectic.loss(displacement, cov, experiment.transmission[i], i)
         self.pure_cov = cov.copy()
         for i in range(experiment.sources):
             if self.pure_cov[i, i] < 1.0:
@@ -159,12 +171,15 @@ class ExactSampler(BaseSampler):
         heterodyne_alpha = (heterodyne_mu[:m] + 1j * heterodyne_mu[m:]) / 2
         gamma = alpha.conj() + self.B @ (heterodyne_alpha - alpha)
         for i in range(m):
+            start_time = datetime.datetime.now()
             j = i + 1
             gamma -= heterodyne_alpha[i] * self.B[:, i]
-            lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff)
+            lhafs = loop_hafnian_batch(self.B[:j, :j], gamma[:j], det_pattern[:i], self.cutoff, glynn=False)
             probs = (lhafs * lhafs.conj()).real / fac(det_outcomes)
             probs /= probs.sum()
             det_pattern[i] = rng.choice(det_outcomes, p=probs)
+            print(f'Mode {i} of {m}, {sum(det_pattern)} photons. Elapsed time: '
+                  f'{(datetime.datetime.now()-start_time).total_seconds()}s')
         return det_pattern
 
 
@@ -209,9 +224,9 @@ class SquashedStateSampler(ClassicalSampler):
 
     def get_squashed_state(self, experiment: GBSExperiment):
         m = experiment.modes
-        vac_vec, cov = walrus_symplectic.vacuum_state(m)
+        displacement, cov = walrus_symplectic.vacuum_state(m)
         for i in range(experiment.sources):
-            s = walrus_symplectic.squeezing(experiment.squeezing, 0)
+            s = walrus_symplectic.squeezing(experiment.squeezing[i], 0)
             S = walrus_symplectic.expand(s, i, experiment.modes)
             cov = S @ cov @ S.conj().T
         for i in range(m):
@@ -223,10 +238,8 @@ class SquashedStateSampler(ClassicalSampler):
                 cov[i, i] = 4 * n + 1
                 cov[i + m, i + m] = 1
         for i in range(experiment.sources):
-            vac_vec, cov = walrus_symplectic.loss(vac_vec, cov, experiment.transmission, i)
-        S_U = walrus_symplectic.interferometer(experiment.unitary)
-        cov = S_U @ cov @ S_U.conj().T
-        displacement = np.zeros(2 * experiment.modes)
+            displacement, cov = walrus_symplectic.loss(displacement, cov, experiment.transmission[i], i)
+        displacement, cov = walrus_symplectic.passive_transformation(displacement, cov, experiment.unitary)
         return GaussianState(experiment.modes, cov, displacement)
 
 
@@ -622,13 +635,16 @@ class MSourceSampler(BaseSampler):
 
     def setup(self, experiment: GBSExperiment):
         super().setup(experiment)
-        A = self._state.get_A()
+        self.B = self._state.get_B()
+        C = self._state.get_C()
         m = self._state.modes
-        self.c = A[0, m].real
-        self.B = A[:m, :m] / (1 - self.c)
+        self.c = np.diag(C).real
+        for i in range(m):
+            self.B[:, i] /= np.sqrt(1 - self.c[i])
+            self.B[i, :] /= np.sqrt(1 - self.c[i])
         cov = self.get_cov_from_B(self.B)
-        nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
         self.chol_T_I = np.linalg.cholesky(cov + np.eye(2 * m))
+        nbar = np.diag(cov)[:m] + np.diag(cov)[m:]
         self.order = np.argsort(nbar)
         self.inv_order = np.argsort(self.order)
         order_long = np.concatenate((self.order, self.order + m))
@@ -650,7 +666,7 @@ class MSourceSampler(BaseSampler):
             probs /= probs.sum()
             det_pattern[i] = rng.choice(det_outcomes, p=probs)
         for i in range(m):
-            det_pattern[i] += self.sample_noise_photons(det_pattern[i])
+            det_pattern[i] += self.sample_noise_photons(det_pattern[i], self.c[i])
         return det_pattern[self.inv_order]
 
     def get_cov_from_B(self, B):
@@ -658,20 +674,111 @@ class MSourceSampler(BaseSampler):
         A = block_diag(B, B.conj())
         return Covmat(np.linalg.inv(np.eye(2 * m) - (Xmat(m) @ A).conj())) #Qinv = I - (XA)*
 
-    def sample_noise_photons(self, n):
+    def sample_noise_photons(self, n, c):
         """
         sample number of additional noise photons n2, given n photons sampled already, and using self.c
         p = norm.const * self.c ** n2 * nchoosek(n + n2, n)
         norm.const = (1 - self.c) ** (n + 1)
         """
-        threshold = rng.random() / (1 - self.c) ** (n + 1)
+        threshold = rng.random() / (1 - c) ** (n + 1)
         cumulator = 1
         p = 1
         n2 = 0
         while cumulator < threshold:
             n2 += 1
-            p *= self.c * (n + n2) / n2
-            cumulator += p # self.c ** n2 * nchoosek(n + n2, n)
+            p *= c * (n + n2) / n2
+            cumulator += p # c ** n2 * nchoosek(n + n2, n)
+        return n2
+
+
+class FasterExactSampler(ExactSampler):
+    """
+    Generalise MSourceSampler to include off-diagonals in C.
+    Currently assume no displacement
+    """
+    def __init__(self, experiment: GBSExperiment, cutoff=8, pure_state_sampler=None):
+        self.d = None
+        super().__init__(experiment, cutoff, pure_state_sampler)
+
+    def setup(self, experiment: GBSExperiment):
+        super().setup(experiment)
+        m = self._state.modes
+        noise_removed_A, self.d = self.calc_A_and_d()
+        noise_removed_cov = self.get_cov_from_A(noise_removed_A)
+        assert (is_valid_cov(noise_removed_cov))
+        noise_removed_state = GaussianState(m, noise_removed_cov, np.zeros(2*m))
+        self.pure_state_sampler.setup_from_state(noise_removed_state)
+        self.chol_T_I = np.linalg.cholesky(self.pure_state_sampler.pure_cov + np.eye(2 * m))
+        example_pure_state = self.pure_state_sampler.get_sample()
+        self.B = example_pure_state.get_B()  # store B, it doesn't vary from sample to sample
+        nbar = np.diag(noise_removed_cov)[:m] + np.diag(noise_removed_cov)[m:]
+        self.order = np.argsort(nbar)
+        self.inv_order = np.argsort(self.order)
+        order_long = np.concatenate((self.order, self.order + m))
+        self.B = self.B[np.ix_(self.order, self.order)]
+        self.d = self.d[self.order]
+        self.chol_T_I = self.chol_T_I[np.ix_(order_long, order_long)]
+
+    def calc_A_and_d(self):
+        C, m = self._state.get_C(), self._state.modes
+        fixed_indices = [i for i in range(m)]
+        reduced_indices = [np.argmax(np.diag(C))]
+        fixed_indices.remove(reduced_indices[0])
+        go = True
+        while go is True:
+            P, Q = C[np.ix_(reduced_indices, reduced_indices)], C[np.ix_(reduced_indices, fixed_indices)]
+            Rinv = np.linalg.inv(C[np.ix_(fixed_indices, fixed_indices)])
+            schur_comp = P - Q @ Rinv @ np.transpose(np.conj(Q))
+            emin = min(np.linalg.eigvalsh(schur_comp))
+            biggest_fixed_index = fixed_indices[np.argmax(np.diag(C)[fixed_indices])] \
+                if len(fixed_indices) > 0 else None
+            if biggest_fixed_index is not None \
+                    and np.diag(C)[biggest_fixed_index] > np.diag(C)[reduced_indices[0]] - emin:
+                for i in reduced_indices:
+                    C[i, i] = max(np.diag(C)[fixed_indices])
+                reduced_indices.append(biggest_fixed_index)
+                fixed_indices.remove(biggest_fixed_index)
+            else:
+                for i in reduced_indices:
+                    C[i, i] -= emin
+                    go = False
+        d = (np.diag(self._state.get_C()) - np.diag(C)).real
+        # assert(all(np.linalg.eigvalsh(C) >= 0))
+        A = self._state.get_A()
+        A[:m, m:] = C
+        A[m:, :m] = np.transpose(C)
+        for i in range(m):
+            A[i, :] /= np.sqrt(1 - d[i])
+            A[i + m, :] /= np.sqrt(1 - d[i])
+            A[:, i] /= np.sqrt(1 - d[i])
+            A[:, i + m] /= np.sqrt(1 - d[i])
+        return A, d
+
+    def _get_sample(self):
+        det_pattern = super()._get_sample()
+        m = self._state.modes
+        for i in range(m):
+            det_pattern[i] += self.sample_noise_photons(det_pattern[i], self.d[i])
+        return det_pattern[self.inv_order]
+
+    def get_cov_from_A(self, A):
+        m = self._state.modes
+        return Covmat(np.linalg.inv(np.eye(2 * m) - (Xmat(m) @ A).conj()))  # Qinv = I - (XA)*
+
+    def sample_noise_photons(self, n, d):
+        """
+        sample number of additional noise photons n2, given n photons sampled already
+        p = norm.const * d ** n2 * nchoosek(n + n2, n)
+        norm.const = (1 - d) ** (n + 1)
+        """
+        threshold = rng.random() / (1 - d) ** (n + 1)
+        cumulator = 1
+        p = 1
+        n2 = 0
+        while cumulator < threshold:
+            n2 += 1
+            p *= d * (n + n2) / n2
+            cumulator += p  # d ** n2 * nchoosek(n + n2, n)
         return n2
 
 
@@ -685,8 +792,8 @@ class WalrusSampler(BaseSampler):
         self.max_photons = max_photons
 
     def _get_sample(self):
-        det_pattern =  generate_hafnian_sample(self._state.cov, self._state.displacement, cutoff=self.cutoff,
-                                               max_photons=self.max_photons)
+        det_pattern = generate_hafnian_sample(self._state.cov, self._state.displacement, cutoff=self.cutoff,
+                                              max_photons=self.max_photons)
         if det_pattern == -1:
             return [0] * self._state.modes
         return det_pattern
